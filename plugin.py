@@ -10,7 +10,7 @@
         - Frequency (Hz)<br/>
     </description>
     <params>
-        <param field="Address" label="IP Address" width="130px" required="true" default="10.0.0.185"/>
+        <param field="Address" label="IP Address" width="130px" required="true" default=""/>
         <param field="Port" label="Port" width="30px" required="true" default="80"/>
         <param field="Username" label="Username" width="60px" required="false" default=""/>
         <param field="Password" label="Password" width="60px" password="true" required="false" default=""/>

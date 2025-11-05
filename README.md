@@ -22,4 +22,7 @@ sudo systemctl restart domoticz
 ```
 
 This plugin has only been tested working with a Shelly Pro 1PM at the moment. It should work with any Shelly device which is able to count energy and have a switch.
+
 Not been tested with a username and password.
+
+If you want to use this plugin to read produced energy (and not consumed energy), you should change sensor Type from "Usage" to "Return".

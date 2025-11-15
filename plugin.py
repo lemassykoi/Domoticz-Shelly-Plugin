@@ -1,5 +1,5 @@
 """
-<plugin key="ShellyPro1PM" name="Shelly Pro 1PM" author="clement" version="1.0">
+<plugin key="ShellyPro1PM" name="Shelly Pro 1PM" author="lemassykoi" version="1.0">
     <description>
         <h2>Shelly Pro 1PM Gen2</h2><br/>
         WebSocket-based integration for Shelly Pro 1PM Gen2 device<br/>
@@ -10,7 +10,7 @@
         - Frequency (Hz)<br/>
     </description>
     <params>
-        <param field="Address" label="IP Address" width="130px" required="true" default=""/>
+        <param field="Address" label="IP Address" width="130px" required="true" default="192.168.0.10"/>
         <param field="Port" label="Port" width="30px" required="true" default="80"/>
         <param field="Username" label="Username" width="60px" required="false" default=""/>
         <param field="Password" label="Password" width="60px" password="true" required="false" default=""/>
@@ -35,31 +35,6 @@ import DomoticzEx as Domoticz
 import json
 import secrets
 import base64
-
-
-class ShellyUnit(Domoticz.Unit):
-    def __init__(self, Name, DeviceID, Unit, TypeName="", Type=0, Subtype=0, Switchtype=0, Image=0, Options="", Used=0, Description=""):
-        super().__init__(Name, DeviceID, Unit, TypeName, Type, Subtype, Switchtype, Image, Options, Used, Description)
-    
-    def onCommand(self, Command, Level, Hue):
-        global _plugin
-        Domoticz.Log("onCommand called for '" + str(self.Name) + "': Command='" + str(Command) + "', Level=" + str(Level))
-        
-        if self.Unit == BasePlugin.UNIT_SWITCH:
-            turn_on = Command.strip().upper() == "ON"
-            
-            rpc_command = {
-                "id": 3,
-                "src": "user",
-                "method": "Switch.Set",
-                "params": {
-                    "id": 0,
-                    "on": turn_on
-                }
-            }
-            if _plugin.websocketConn and _plugin.websocketConn.Connected():
-                _plugin.websocketConn.Send({'Payload': json.dumps(rpc_command), 'Mask': secrets.randbits(32)})
-                Domoticz.Log("Sent switch command: " + ("ON" if turn_on else "OFF"))
 
 
 class BasePlugin:
@@ -91,14 +66,14 @@ class BasePlugin:
         # Create devices if they don't exist
         if self.DEVICEID_SWITCH not in Devices:
             try:
-                ShellyUnit(Name=f"{device_friendly_name} Switch", DeviceID=self.DEVICEID_SWITCH, Unit=self.UNIT_SWITCH, Type=244, Subtype=73, Used=1, Switchtype=0).Create()
+                Domoticz.Unit(Name=f"{device_friendly_name} Switch", DeviceID=self.DEVICEID_SWITCH, Unit=self.UNIT_SWITCH, Type=244, Subtype=73, Used=1, Switchtype=0).Create()
                 Domoticz.Log("Switch device created")
             except Exception as e:
                 Domoticz.Debug("Switch device already exists or creation failed: " + str(e))
         
         if self.DEVICEID_ENERGY not in Devices:
             try:
-                ShellyUnit(Name=f"{device_friendly_name} Energy", DeviceID=self.DEVICEID_ENERGY, Unit=self.UNIT_ENERGY, Type=243, Subtype=29, Used=1).Create()
+                Domoticz.Unit(Name=f"{device_friendly_name} Energy", DeviceID=self.DEVICEID_ENERGY, Unit=self.UNIT_ENERGY, Type=243, Subtype=29, Used=1).Create()
                 Domoticz.Log("Energy device created (importing mode)")
             except Exception as e:
                 Domoticz.Debug("Energy device already exists or creation failed: " + str(e))
@@ -106,7 +81,7 @@ class BasePlugin:
         if self.DEVICEID_FREQUENCY not in Devices:
             try:
                 Options = {"Custom": "1;Hz"}
-                ShellyUnit(Name=f"{device_friendly_name} Frequency", DeviceID=self.DEVICEID_FREQUENCY, Unit=self.UNIT_FREQUENCY, Type=243, Subtype=31, Used=0, Options=Options).Create()
+                Domoticz.Unit(Name=f"{device_friendly_name} Frequency", DeviceID=self.DEVICEID_FREQUENCY, Unit=self.UNIT_FREQUENCY, Type=243, Subtype=31, Used=0, Options=Options).Create()
                 Domoticz.Log("Frequency device created")
             except Exception as e:
                 Domoticz.Debug("Frequency device already exists or creation failed: " + str(e))
@@ -254,6 +229,25 @@ class BasePlugin:
 
     def onDeviceModified(self, DeviceID, Unit):
         Domoticz.Log("onDeviceModified called for DeviceID=" + str(DeviceID) + ", Unit=" + str(Unit))
+    
+    def onCommand(self, DeviceID, Unit, Command, Level, Hue):
+        Domoticz.Log("onCommand called for DeviceID=" + str(DeviceID) + ", Unit=" + str(Unit) + ": Command='" + str(Command) + "', Level=" + str(Level))
+        
+        if Unit == self.UNIT_SWITCH:
+            turn_on = Command.strip().upper() == "ON"
+            
+            rpc_command = {
+                "id": 3,
+                "src": "user",
+                "method": "Switch.Set",
+                "params": {
+                    "id": 0,
+                    "on": turn_on
+                }
+            }
+            if self.websocketConn and self.websocketConn.Connected():
+                self.websocketConn.Send({'Payload': json.dumps(rpc_command), 'Mask': secrets.randbits(32)})
+                Domoticz.Log("Sent switch command: " + ("ON" if turn_on else "OFF"))
 
     def onStop(self):
         Domoticz.Log("onStop called")
@@ -285,6 +279,10 @@ def onMessage(Connection, Data):
 def onDeviceModified(DeviceID, Unit):
     global _plugin
     _plugin.onDeviceModified(DeviceID, Unit)
+
+def onCommand(DeviceID, Unit, Command, Level, Hue):
+    global _plugin
+    _plugin.onCommand(DeviceID, Unit, Command, Level, Hue)
 
 def onHeartbeat():
     global _plugin

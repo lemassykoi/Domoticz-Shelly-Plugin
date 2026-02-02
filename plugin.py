@@ -35,12 +35,14 @@ import DomoticzEx as Domoticz
 import json
 import secrets
 import base64
+import uuid
 
 
 class BasePlugin:
     websocketConn = None
     reconAgain = 3
     debug = False
+    client_id = None  # Unique identifier for this plugin instance
     
     # Device units
     UNIT_SWITCH = 1
@@ -58,6 +60,7 @@ class BasePlugin:
     last_frequency = 0.0
 
     def onStart(self):
+        self.client_id = str(uuid.uuid4())
         device_friendly_name = str(Parameters["Mode1"])
         if int(Parameters["Mode6"]) > 0:
             Domoticz.Debugging(int(Parameters["Mode6"]))
@@ -125,11 +128,11 @@ class BasePlugin:
             if Data["Status"] == "101":
                 Domoticz.Log("WebSocket successfully upgraded")
                 # Subscribe to all events
-                subscribe_msg = {"id": 1, "src": "user", "params": {"events": ["*"]}}
+                subscribe_msg = {"id": 1, "src": self.client_id, "params": {"events": ["*"]}}
                 Connection.Send({'Payload': json.dumps(subscribe_msg), 'Mask': secrets.randbits(32)})
-                Domoticz.Log("Subscribed to Shelly events")
+                Domoticz.Log(f"Subscribed to Shelly events (client_id: {self.client_id})")
                 # Get initial switch status
-                status_msg = {"id": 2, "src": "user", "method": "Switch.GetStatus", "params": {"id": 0}}
+                status_msg = {"id": 2, "src": self.client_id, "method": "Switch.GetStatus", "params": {"id": 0}}
                 Connection.Send({'Payload': json.dumps(status_msg), 'Mask': secrets.randbits(32)})
                 Domoticz.Log("Requested initial switch status")
             else:
@@ -238,7 +241,7 @@ class BasePlugin:
             
             rpc_command = {
                 "id": 3,
-                "src": "user",
+                "src": self.client_id,
                 "method": "Switch.Set",
                 "params": {
                     "id": 0,

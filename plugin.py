@@ -1,5 +1,5 @@
 """
-<plugin key="ShellyPro1PM" name="Shelly Gen2+ Switch" author="lemassykoi" version="2.0">
+<plugin key="ShellyGen2Switch" name="Shelly Gen2+ Switch" author="lemassykoi" version="2.0">
     <description>
         <h2>Shelly Gen2+ Switch Plugin</h2><br/>
         WebSocket-based integration for Shelly Gen2+ devices with switch and power metering.<br/>

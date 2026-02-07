@@ -1,19 +1,25 @@
 """
-<plugin key="ShellyPro1PM" name="Shelly Pro 1PM" author="lemassykoi" version="1.0">
+<plugin key="ShellyPro1PM" name="Shelly Gen2+ Switch" author="lemassykoi" version="2.0">
     <description>
-        <h2>Shelly Pro 1PM Gen2</h2><br/>
-        WebSocket-based integration for Shelly Pro 1PM Gen2 device<br/>
+        <h2>Shelly Gen2+ Switch Plugin</h2><br/>
+        WebSocket-based integration for Shelly Gen2+ devices with switch and power metering.<br/>
         <br/>
-        Creates the following sensors:<br/>
+        Supported devices include:<br/>
+        - Shelly Pro 1PM (1 switch)<br/>
+        - Shelly Outdoor Plug S Gen3 (1 switch + temperature)<br/>
+        - Shelly Power Strip Gen4 (4 switches)<br/>
+        - Any other Shelly Gen2+ device with switch components<br/>
+        <br/>
+        Per switch channel, creates:<br/>
         - Switch (On/Off control)<br/>
-        - Energy (kWh)<br/>
+        - Energy (W + Wh)<br/>
         - Frequency (Hz)<br/>
+        - Temperature (if reported by device)<br/>
     </description>
     <params>
         <param field="Address" label="IP Address" width="130px" required="true" default="192.168.0.10"/>
-        <param field="Port" label="Port" width="30px" required="true" default="80"/>
-        <param field="Username" label="Username" width="60px" required="false" default=""/>
-        <param field="Password" label="Password" width="60px" password="true" required="false" default=""/>
+        <param field="Username" label="Shelly Username" width="60px" required="false" default=""/>
+        <param field="Password" label="Shelly Password" width="60px" password="true" required="false" default=""/>
         <param field="Mode1" label="Friendly Name" width="120px" required="true" default="Shelly"/>
         <param field="Mode6" label="Debug" width="150px">
             <options>
@@ -33,268 +39,388 @@
 
 import DomoticzEx as Domoticz
 import json
+import re
 import secrets
 import base64
 import uuid
+
+
+UNITS_PER_CHANNEL = 4
+UNIT_OFFSET_SWITCH = 0
+UNIT_OFFSET_ENERGY = 1
+UNIT_OFFSET_FREQUENCY = 2
+UNIT_OFFSET_TEMPERATURE = 3
 
 
 class BasePlugin:
     websocketConn = None
     reconAgain = 3
     debug = False
-    client_id = None  # Unique identifier for this plugin instance
-    
-    # Device units
-    UNIT_SWITCH = 1
-    UNIT_ENERGY = 2
-    UNIT_FREQUENCY = 3
-    
-    # Device IDs (keys for Extended Framework)
-    DEVICEID_SWITCH = "switch:0"
-    DEVICEID_ENERGY = "switch:0:energy"
-    DEVICEID_FREQUENCY = "switch:0:freq"
-    
-    # Cache for partial updates
-    last_power = 0.0
-    last_energy_wh = 0.0
-    last_frequency = 0.0
+    client_id = None
+
+    def __init__(self):
+        self.channel_cache = {}
+        self.discovered_channels = set()
+        self.channel_has_temp = set()
+        self.channel_names = {}
+        self.total_channels = 0
+        self.pending_config = None
+        self.pending_status = None
+
+    def _base_unit(self, ch):
+        return 1 + ch * UNITS_PER_CHANNEL
+
+    def _device_ids(self, ch):
+        return {
+            "switch": f"switch:{ch}",
+            "energy": f"switch:{ch}:energy",
+            "freq": f"switch:{ch}:freq",
+            "temp": f"switch:{ch}:temp",
+        }
+
+    def _channel_label(self, ch, suffix):
+        friendly = str(Parameters["Mode1"])
+        if self.total_channels > 1:
+            shelly_name = self.channel_names.get(ch)
+            if shelly_name:
+                return f"{friendly} {shelly_name} {suffix}"
+            return f"{friendly} Plug {ch + 1} {suffix}"
+        return f"{friendly} {suffix}"
+
+    def _ensure_channel_devices(self, ch, has_temp=False):
+        if ch in self.discovered_channels:
+            return
+        self.discovered_channels.add(ch)
+        if has_temp:
+            self.channel_has_temp.add(ch)
+        self.channel_cache[ch] = {"power": 0.0, "energy_wh": 0.0, "freq": 0.0, "temp": None}
+
+        base = self._base_unit(ch)
+        ids = self._device_ids(ch)
+
+        if ids["switch"] not in Devices:
+            try:
+                Domoticz.Unit(
+                    Name=self._channel_label(ch, "Switch"),
+                    DeviceID=ids["switch"],
+                    Unit=base + UNIT_OFFSET_SWITCH,
+                    Type=244, Subtype=73, Used=1, Switchtype=0,
+                ).Create()
+                Domoticz.Log(f"Created switch device for channel {ch}")
+            except Exception as e:
+                Domoticz.Debug(f"Switch device ch{ch} creation failed: {e}")
+
+        if ids["energy"] not in Devices:
+            try:
+                Domoticz.Unit(
+                    Name=self._channel_label(ch, "Energy"),
+                    DeviceID=ids["energy"],
+                    Unit=base + UNIT_OFFSET_ENERGY,
+                    Type=243, Subtype=29, Used=1,
+                ).Create()
+                Domoticz.Log(f"Created energy device for channel {ch}")
+            except Exception as e:
+                Domoticz.Debug(f"Energy device ch{ch} creation failed: {e}")
+
+        if ids["freq"] not in Devices:
+            try:
+                Domoticz.Unit(
+                    Name=self._channel_label(ch, "Frequency"),
+                    DeviceID=ids["freq"],
+                    Unit=base + UNIT_OFFSET_FREQUENCY,
+                    Type=243, Subtype=31, Used=0,
+                    Options={"Custom": "1;Hz"},
+                ).Create()
+                Domoticz.Log(f"Created frequency device for channel {ch}")
+            except Exception as e:
+                Domoticz.Debug(f"Frequency device ch{ch} creation failed: {e}")
+
+        if has_temp and ids["temp"] not in Devices:
+            try:
+                Domoticz.Unit(
+                    Name=self._channel_label(ch, "Temperature"),
+                    DeviceID=ids["temp"],
+                    Unit=base + UNIT_OFFSET_TEMPERATURE,
+                    Type=80, Subtype=5, Used=1,
+                ).Create()
+                Domoticz.Log(f"Created temperature device for channel {ch}")
+            except Exception as e:
+                Domoticz.Debug(f"Temperature device ch{ch} creation failed: {e}")
+
+    def _process_switch_data(self, ch, data):
+        Domoticz.Debug(f"Processing switch:{ch} data: {json.dumps(data)}")
+
+        cache = self.channel_cache.setdefault(ch, {"power": 0.0, "energy_wh": 0.0, "freq": 0.0, "temp": None})
+        ids = self._device_ids(ch)
+        base = self._base_unit(ch)
+
+        if "apower" in data:
+            cache["power"] = abs(data["apower"])
+
+        if "aenergy" in data and "total" in data["aenergy"]:
+            cache["energy_wh"] = data["aenergy"]["total"]
+
+        if "freq" in data:
+            cache["freq"] = data["freq"]
+
+        if "temperature" in data:
+            t = data["temperature"]
+            if isinstance(t, dict):
+                cache["temp"] = t.get("tC", t.get("tF"))
+            elif isinstance(t, (int, float)):
+                cache["temp"] = t
+
+        if "output" in data and ids["switch"] in Devices:
+            is_on = data["output"]
+            unit = base + UNIT_OFFSET_SWITCH
+            Devices[ids["switch"]].Units[unit].nValue = 1 if is_on else 0
+            Devices[ids["switch"]].Units[unit].sValue = "On" if is_on else "Off"
+            Devices[ids["switch"]].Units[unit].Update(Log=True)
+            Domoticz.Log(f"Switch:{ch} updated: {'On' if is_on else 'Off'}")
+
+        if ("aenergy" in data or "apower" in data) and ids["energy"] in Devices:
+            sValue = f"{cache['power']:.1f};{cache['energy_wh']:.1f}"
+            unit = base + UNIT_OFFSET_ENERGY
+            Devices[ids["energy"]].Units[unit].nValue = 0
+            Devices[ids["energy"]].Units[unit].sValue = sValue
+            Devices[ids["energy"]].Units[unit].Update(Log=True)
+            Domoticz.Log(f"Energy:{ch} updated: {sValue}")
+
+        if "freq" in data and ids["freq"] in Devices:
+            unit = base + UNIT_OFFSET_FREQUENCY
+            Devices[ids["freq"]].Units[unit].nValue = 0
+            Devices[ids["freq"]].Units[unit].sValue = str(cache["freq"])
+            Devices[ids["freq"]].Units[unit].Update(Log=True)
+            Domoticz.Log(f"Frequency:{ch} updated: {cache['freq']}")
+
+        if cache["temp"] is not None and ids["temp"] in Devices:
+            unit = base + UNIT_OFFSET_TEMPERATURE
+            Devices[ids["temp"]].Units[unit].nValue = 0
+            Devices[ids["temp"]].Units[unit].sValue = str(cache["temp"])
+            Devices[ids["temp"]].Units[unit].Update(Log=True)
+            Domoticz.Log(f"Temperature:{ch} updated: {cache['temp']}")
+
+    def _extract_channel_names(self, config):
+        for key, value in config.items():
+            m = re.match(r"^switch:(\d+)$", key)
+            if m:
+                ch = int(m.group(1))
+                name = value.get("name")
+                if name:
+                    self.channel_names[ch] = name
+
+    def _discover_channels(self, status):
+        channels = []
+        for key, value in status.items():
+            m = re.match(r"^switch:(\d+)$", key)
+            if m:
+                channels.append((int(m.group(1)), value))
+        self.total_channels = len(channels)
+        for ch, value in channels:
+            has_temp = "temperature" in value
+            self._ensure_channel_devices(ch, has_temp=has_temp)
+            self._process_switch_data(ch, value)
+
+    def _try_complete_discovery(self):
+        if self.pending_config is not None and self.pending_status is not None:
+            self._extract_channel_names(self.pending_config)
+            self._discover_channels(self.pending_status)
+            self.pending_config = None
+            self.pending_status = None
+
+    def _send_ws(self, payload):
+        if self.websocketConn and self.websocketConn.Connected():
+            self.websocketConn.Send({"Payload": json.dumps(payload), "Mask": secrets.randbits(32)})
 
     def onStart(self):
         self.client_id = str(uuid.uuid4())
-        device_friendly_name = str(Parameters["Mode1"])
         if int(Parameters["Mode6"]) > 0:
             Domoticz.Debugging(int(Parameters["Mode6"]))
             self.debug = True
 
-        # Create devices if they don't exist
-        if self.DEVICEID_SWITCH not in Devices:
-            try:
-                Domoticz.Unit(Name=f"{device_friendly_name} Switch", DeviceID=self.DEVICEID_SWITCH, Unit=self.UNIT_SWITCH, Type=244, Subtype=73, Used=1, Switchtype=0).Create()
-                Domoticz.Log("Switch device created")
-            except Exception as e:
-                Domoticz.Debug("Switch device already exists or creation failed: " + str(e))
-        
-        if self.DEVICEID_ENERGY not in Devices:
-            try:
-                Domoticz.Unit(Name=f"{device_friendly_name} Energy", DeviceID=self.DEVICEID_ENERGY, Unit=self.UNIT_ENERGY, Type=243, Subtype=29, Used=1).Create()
-                Domoticz.Log("Energy device created (importing mode)")
-            except Exception as e:
-                Domoticz.Debug("Energy device already exists or creation failed: " + str(e))
-        
-        if self.DEVICEID_FREQUENCY not in Devices:
-            try:
-                Options = {"Custom": "1;Hz"}
-                Domoticz.Unit(Name=f"{device_friendly_name} Frequency", DeviceID=self.DEVICEID_FREQUENCY, Unit=self.UNIT_FREQUENCY, Type=243, Subtype=31, Used=0, Options=Options).Create()
-                Domoticz.Log("Frequency device created")
-            except Exception as e:
-                Domoticz.Debug("Frequency device already exists or creation failed: " + str(e))
+        Domoticz.Log("Available devices at start: " + str(list(Devices.keys())))
 
-        # Log which devices are available
-        Domoticz.Log("Available devices: " + str(list(Devices.keys())))
-
-        # Connect to Shelly device via WebSocket
         self.websocketConn = Domoticz.Connection(
-            Name      = "ShellyWebSocket",
-            Transport = "TCP/IP",
-            Protocol  = "WS",
-            Address   = Parameters["Address"],
-            Port      = Parameters["Port"]
-            )
+            Name="ShellyWebSocket",
+            Transport="TCP/IP",
+            Protocol="WS",
+            Address=Parameters["Address"],
+            Port="80",
+        )
         self.websocketConn.Connect()
 
     def onConnect(self, Connection, Status, Description):
         if Status == 0:
-            Domoticz.Log("Connected successfully to: " + Connection.Address + ":" + Connection.Port)
-            # Upgrade to WebSocket
+            Domoticz.Log("Connected to: " + Connection.Address + ":" + Connection.Port)
             send_data = {
-                'URL': '/rpc',
-                'Headers': {
-                    'Host': Parameters["Address"],
-                    'Origin': 'http://' + Parameters["Address"],
-                    'Sec-WebSocket-Key': base64.b64encode(secrets.token_bytes(16)).decode("utf-8")
-                    }
-                }
+                "URL": "/rpc",
+                "Headers": {
+                    "Host": Parameters["Address"],
+                    "Origin": "http://" + Parameters["Address"],
+                    "Sec-WebSocket-Key": base64.b64encode(secrets.token_bytes(16)).decode("utf-8"),
+                },
+            }
             Connection.Send(send_data)
         else:
-            Domoticz.Log("Failed to connect (" + str(Status) + ") to: " + Connection.Address + ":" + Connection.Port)
-            Domoticz.Debug("Failed to connect (" + str(
-                Status) + ") to: " + Connection.Address + ":" + Connection.Port + " with error: " + Description)
+            Domoticz.Log(f"Failed to connect ({Status}) to: {Connection.Address}:{Connection.Port}")
+            Domoticz.Debug(f"Connection error: {Description}")
         return True
 
     def onMessage(self, Connection, Data):
         Domoticz.Debug("onMessage called")
-        
-        if "Status" in Data:  # HTTP Message
+
+        if "Status" in Data:
             if Data["Status"] == "101":
-                Domoticz.Log("WebSocket successfully upgraded")
-                # Subscribe to all events
+                Domoticz.Log("WebSocket upgraded")
                 subscribe_msg = {"id": 1, "src": self.client_id, "params": {"events": ["*"]}}
-                Connection.Send({'Payload': json.dumps(subscribe_msg), 'Mask': secrets.randbits(32)})
-                Domoticz.Log(f"Subscribed to Shelly events (client_id: {self.client_id})")
-                # Get initial switch status
-                status_msg = {"id": 2, "src": self.client_id, "method": "Switch.GetStatus", "params": {"id": 0}}
-                Connection.Send({'Payload': json.dumps(status_msg), 'Mask': secrets.randbits(32)})
-                Domoticz.Log("Requested initial switch status")
+                self._send_ws(subscribe_msg)
+                Domoticz.Log(f"Subscribed to events (client_id: {self.client_id})")
+                config_msg = {"id": 10, "src": self.client_id, "method": "Shelly.GetConfig", "params": {}}
+                self._send_ws(config_msg)
+                status_msg = {"id": 11, "src": self.client_id, "method": "Shelly.GetStatus", "params": {}}
+                self._send_ws(status_msg)
+                Domoticz.Log("Requested config and status for discovery")
             else:
                 DumpWSResponseToLog(Data)
-                
-        elif "Operation" in Data:  # WebSocket control message
+
+        elif "Operation" in Data:
             if Data["Operation"] == "Ping":
-                Domoticz.Debug("Ping Message received")
-                Connection.Send({'Operation': 'Pong', 'Payload': 'Pong', 'Mask': secrets.randbits(32)})
+                Domoticz.Debug("Ping received")
+                Connection.Send({"Operation": "Pong", "Payload": "Pong", "Mask": secrets.randbits(32)})
             elif Data["Operation"] == "Pong":
-                Domoticz.Debug("Pong Message received")
+                Domoticz.Debug("Pong received")
             elif Data["Operation"] == "Close":
-                Domoticz.Log("Close Message received")
+                Domoticz.Log("Close received")
             else:
                 DumpWSResponseToLog(Data)
-                
-        elif "Payload" in Data:  # WebSocket data message
+
+        elif "Payload" in Data:
             try:
                 payload = json.loads(Data["Payload"])
                 Domoticz.Debug("Received: " + json.dumps(payload))
-                
-                # Check if it's a NotifyStatus message with switch:0 data
+
                 if payload.get("method") == "NotifyStatus" and "params" in payload:
                     params = payload["params"]
-                    if "switch:0" in params:
-                        self.ProcessSwitchData(params["switch:0"])
-                
-                # Check if it's a response to Switch.GetStatus
+                    for key, value in params.items():
+                        m = re.match(r"^switch:(\d+)$", key)
+                        if m:
+                            ch = int(m.group(1))
+                            if ch not in self.discovered_channels:
+                                self._ensure_channel_devices(ch, has_temp=("temperature" in value))
+                            self._process_switch_data(ch, value)
+
                 elif "result" in payload and "id" in payload:
-                    if payload["id"] == 2:  # Our Switch.GetStatus request
-                        Domoticz.Log("Received initial switch status")
-                        self.ProcessSwitchData(payload["result"])
+                    if payload["id"] == 10:
+                        Domoticz.Log("Received device config")
+                        self.pending_config = payload["result"]
+                        self._try_complete_discovery()
+                    elif payload["id"] == 11:
+                        Domoticz.Log("Received device status")
+                        self.pending_status = payload["result"]
+                        self._try_complete_discovery()
+
             except json.JSONDecodeError as e:
-                Domoticz.Error("Failed to parse JSON payload: " + str(e))
+                Domoticz.Error("Failed to parse JSON: " + str(e))
             except Exception as e:
                 import traceback
                 Domoticz.Error("Error processing message: " + str(e))
                 Domoticz.Error("Traceback: " + traceback.format_exc())
 
-    def ProcessSwitchData(self, switch_data):
-        Domoticz.Debug("Processing switch data: " + json.dumps(switch_data))
-        
-        # Update cached values if present (use absolute value for power)
-        if "apower" in switch_data:
-            self.last_power = abs(switch_data["apower"])
-        
-        if "aenergy" in switch_data and "total" in switch_data["aenergy"]:
-            self.last_energy_wh = switch_data["aenergy"]["total"]
-        
-        if "freq" in switch_data:
-            self.last_frequency = switch_data["freq"]
-        
-        # Update switch state
-        if "output" in switch_data and self.DEVICEID_SWITCH in Devices:
-            is_on = switch_data["output"]
-            Devices[self.DEVICEID_SWITCH].Units[self.UNIT_SWITCH].nValue = 1 if is_on else 0
-            Devices[self.DEVICEID_SWITCH].Units[self.UNIT_SWITCH].sValue = "On" if is_on else "Off"
-            Devices[self.DEVICEID_SWITCH].Units[self.UNIT_SWITCH].Update(Log=True)
-            Domoticz.Log("Switch updated: " + ("On" if is_on else "Off"))
-        
-        # Update energy sensor when we have energy data or power changes
-        if ("aenergy" in switch_data or "apower" in switch_data) and self.DEVICEID_ENERGY in Devices:
-            if self.last_energy_wh > 0:  # Only update if we have valid energy data
-                sValue = "{:.1f};{:.3f}".format(self.last_power, self.last_energy_wh)
-                Devices[self.DEVICEID_ENERGY].Units[self.UNIT_ENERGY].nValue = 0
-                Devices[self.DEVICEID_ENERGY].Units[self.UNIT_ENERGY].sValue = sValue
-                Devices[self.DEVICEID_ENERGY].Units[self.UNIT_ENERGY].Update(Log=True)
-                Domoticz.Log("Energy updated: " + sValue)
-        
-        # Update frequency
-        if "freq" in switch_data and self.DEVICEID_FREQUENCY in Devices:
-            Devices[self.DEVICEID_FREQUENCY].Units[self.UNIT_FREQUENCY].nValue = 0
-            Devices[self.DEVICEID_FREQUENCY].Units[self.UNIT_FREQUENCY].sValue = str(self.last_frequency)
-            Devices[self.DEVICEID_FREQUENCY].Units[self.UNIT_FREQUENCY].Update(Log=True)
-            Domoticz.Log("Frequency updated: " + str(self.last_frequency))
-
     def onHeartbeat(self):
         Domoticz.Debug("onHeartbeat called")
         if self.websocketConn and self.websocketConn.Connected():
-            # Send ping to keep connection alive
-            self.websocketConn.Send({'Operation': 'Ping', 'Mask': secrets.randbits(32)})
+            self.websocketConn.Send({"Operation": "Ping", "Mask": secrets.randbits(32)})
             Domoticz.Debug("Ping sent")
         else:
-            # Try to reconnect
             self.reconAgain -= 1
             if self.reconAgain <= 0:
-                Domoticz.Log("Reconnecting to Shelly device...")
-                self.websocketConn = Domoticz.Connection(Name="ShellyWebSocket", Transport="TCP/IP", Protocol="WS",
-                                                       Address=Parameters["Address"], Port=Parameters["Port"])
+                Domoticz.Log("Reconnecting...")
+                self.websocketConn = Domoticz.Connection(
+                    Name="ShellyWebSocket",
+                    Transport="TCP/IP",
+                    Protocol="WS",
+                    Address=Parameters["Address"],
+                    Port="80",
+                )
                 self.websocketConn.Connect()
                 self.reconAgain = 3
             else:
-                Domoticz.Log("Will try reconnect again in " + str(self.reconAgain) + " heartbeats.")
+                Domoticz.Log(f"Reconnect in {self.reconAgain} heartbeats.")
 
     def onDisconnect(self, Connection):
         Domoticz.Log("Shelly device disconnected")
 
     def onDeviceModified(self, DeviceID, Unit):
-        Domoticz.Log("onDeviceModified called for DeviceID=" + str(DeviceID) + ", Unit=" + str(Unit))
-    
+        Domoticz.Log(f"onDeviceModified: DeviceID={DeviceID}, Unit={Unit}")
+
     def onCommand(self, DeviceID, Unit, Command, Level, Hue):
-        Domoticz.Log("onCommand called for DeviceID=" + str(DeviceID) + ", Unit=" + str(Unit) + ": Command='" + str(Command) + "', Level=" + str(Level))
-        
-        if Unit == self.UNIT_SWITCH:
+        Domoticz.Log(f"onCommand: DeviceID={DeviceID}, Unit={Unit}, Command='{Command}', Level={Level}")
+
+        m = re.match(r"^switch:(\d+)$", DeviceID)
+        if m:
+            ch = int(m.group(1))
             turn_on = Command.strip().upper() == "ON"
-            
             rpc_command = {
-                "id": 3,
+                "id": 100,
                 "src": self.client_id,
                 "method": "Switch.Set",
-                "params": {
-                    "id": 0,
-                    "on": turn_on
-                }
+                "params": {"id": ch, "on": turn_on},
             }
-            if self.websocketConn and self.websocketConn.Connected():
-                self.websocketConn.Send({'Payload': json.dumps(rpc_command), 'Mask': secrets.randbits(32)})
-                Domoticz.Log("Sent switch command: " + ("ON" if turn_on else "OFF"))
+            self._send_ws(rpc_command)
+            Domoticz.Log(f"Sent switch:{ch} command: {'ON' if turn_on else 'OFF'}")
 
     def onStop(self):
         Domoticz.Log("onStop called")
         return True
 
+
 global _plugin
 _plugin = BasePlugin()
+
 
 def onStart():
     global _plugin
     _plugin.onStart()
 
+
 def onStop():
     global _plugin
     _plugin.onStop()
+
 
 def onConnect(Connection, Status, Description):
     global _plugin
     _plugin.onConnect(Connection, Status, Description)
 
+
 def onDisconnect(Connection):
     global _plugin
     _plugin.onDisconnect(Connection)
+
 
 def onMessage(Connection, Data):
     global _plugin
     _plugin.onMessage(Connection, Data)
 
+
 def onDeviceModified(DeviceID, Unit):
     global _plugin
     _plugin.onDeviceModified(DeviceID, Unit)
+
 
 def onCommand(DeviceID, Unit, Command, Level, Hue):
     global _plugin
     _plugin.onCommand(DeviceID, Unit, Command, Level, Hue)
 
+
 def onHeartbeat():
     global _plugin
     _plugin.onHeartbeat()
 
-# Generic helper functions
+
 def DumpWSResponseToLog(httpDict):
     if isinstance(httpDict, dict):
-        Domoticz.Log("WebSocket Details ("+str(len(httpDict))+"):")
+        Domoticz.Log("WebSocket Details (" + str(len(httpDict)) + "):")
         for x in httpDict:
             if isinstance(httpDict[x], dict):
                 Domoticz.Log("--->'"+x+" ("+str(len(httpDict[x]))+"):")

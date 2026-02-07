@@ -1,20 +1,23 @@
 """
-<plugin key="ShellyGen2Switch" name="Shelly Gen2+ Switch" author="lemassykoi" version="2.0">
+<plugin key="ShellyGen2Switch" name="Shelly Gen2+ Switch" author="lemassykoi" version="2.0" externallink="https://github.com/lemassykoi/Domoticz-Shelly-Plugin">
     <description>
         <h2>Shelly Gen2+ Switch Plugin</h2><br/>
         WebSocket-based integration for Shelly Gen2+ devices with switch and power metering.<br/>
         <br/>
-        Supported devices include:<br/>
-        - Shelly Pro 1PM (1 switch)<br/>
-        - Shelly Outdoor Plug S Gen3 (1 switch + temperature)<br/>
-        - Shelly Power Strip Gen4 (4 switches)<br/>
-        - Any other Shelly Gen2+ device with switch components<br/>
-        <br/>
-        Per switch channel, creates:<br/>
-        - Switch (On/Off control)<br/>
-        - Energy (W + Wh)<br/>
-        - Frequency (Hz)<br/>
-        - Temperature (if reported by device)<br/>
+        <h3>Supported devices</h3>
+        <ul style="list-style-type:square">
+            <li>Shelly Pro 1PM (1 switch)</li>
+            <li>Shelly Outdoor Plug S Gen3 (1 switch + temperature)</li>
+            <li>Shelly Power Strip Gen4 (4 switches)</li>
+            <li>Any other Shelly Gen2+ device with switch components</li>
+        </ul>
+        <h3>Features</h3>
+        <ul style="list-style-type:square">
+            <li>Switch (On/Off control)</li>
+            <li>Energy (W + Wh)</li>
+            <li>Frequency (Hz)</li>
+            <li>Temperature (if reported by device)</li>
+        </ul>
     </description>
     <params>
         <param field="Address" label="IP Address" width="130px" required="true" default="192.168.0.10"/>

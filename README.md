@@ -4,7 +4,7 @@ Domoticz Plugin for Shelly Gen2+ devices with switch and power metering.
 
 ## Supported Devices
 
-- Shelly Pro 1PM (1 switch)
+- Shelly Pro 1PM (1 switch + temperature)
 - Shelly Outdoor Plug S Gen3 (1 switch + temperature)
 - Shelly Power Strip Gen4 (4 switches)
 - Any other Shelly Gen2+ device with switch components
@@ -36,6 +36,7 @@ git clone https://github.com/lemassykoi/Domoticz-Shelly-Plugin.git
 sudo systemctl restart domoticz
 ```
 
+Then you can add the plugin from the Hardware page in Setup Tab.
 No additional Python packages are required.
 
 ## Configuration
@@ -50,4 +51,4 @@ No additional Python packages are required.
 
 - The plugin connects to the Shelly device on port 80 via WebSocket.
 - For multi-channel devices (e.g. Power Strip), unnamed channels are labeled "Plug 1", "Plug 2", etc. Channels with a name configured in the Shelly app will use that name instead.
-- If you want to use this plugin to read produced energy (and not consumed energy), you should change sensor Type from "Usage" to "Return".
+- If you want to use this plugin to read produced energy (and not consumed energy), you should change domoticz sensor Type from "Usage" to "Return".

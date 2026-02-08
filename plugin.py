@@ -26,14 +26,9 @@
         <param field="Mode1" label="Friendly Name" width="120px" required="true" default="Shelly"/>
         <param field="Mode6" label="Debug" width="150px">
             <options>
-                <option label="None" value="0"  default="true" />
-                <option label="Python Only" value="2"/>
-                <option label="Basic Debugging" value="62"/>
-                <option label="Basic+Messages" value="126"/>
-                <option label="Queue" value="128"/>
-                <option label="Connections Only" value="16"/>
-                <option label="Connections+Queue" value="144"/>
-                <option label="All" value="-1"/>
+                <option label="None" value="0" default="true"/>
+                <option label="Plugin Debug" value="2"/>
+                <option label="All" value="1"/>
             </options>
         </param>
     </params>
@@ -237,8 +232,11 @@ class BasePlugin:
 
     def onStart(self):
         self.client_id = str(uuid.uuid4())
-        if int(Parameters["Mode6"]) > 0:
+        Domoticz.Log("onStart called")
+
+        if Parameters["Mode6"] != "0":
             Domoticz.Debugging(int(Parameters["Mode6"]))
+            DumpConfigToLog()
             self.debug = True
 
         Domoticz.Log("Available devices at start: " + str(list(Devices.keys())))
@@ -420,6 +418,23 @@ def onHeartbeat():
     global _plugin
     _plugin.onHeartbeat()
 
+# Generic helper functions
+def DumpConfigToLog():
+    for x in Parameters:
+        if Parameters[x] != "":
+            if x == "Password":  # Don't log API token
+                Domoticz.Debug("'" + x + "':'***HIDDEN***'")
+            else:
+                Domoticz.Debug(f"'{x}':'{str(Parameters[x])}'")
+
+    Domoticz.Debug("Device count: " + str(len(Devices)))
+    for x in Devices:
+        Domoticz.Debug("Device:           " + str(x) + " - " + str(Devices[x]))
+        Domoticz.Debug("Device ID:       '" + str(Devices[x].ID) + "'")
+        Domoticz.Debug("Device Name:     '" + Devices[x].Name + "'")
+        Domoticz.Debug("Device nValue:    " + str(Devices[x].nValue))
+        Domoticz.Debug("Device sValue:   '" + Devices[x].sValue + "'")
+        Domoticz.Debug("Device LastLevel: " + str(Devices[x].LastLevel))
 
 def DumpWSResponseToLog(httpDict):
     if isinstance(httpDict, dict):

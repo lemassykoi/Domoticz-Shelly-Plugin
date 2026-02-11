@@ -21,8 +21,7 @@
     </description>
     <params>
         <param field="Address" label="IP Address" width="130px" required="true" default="192.168.0.10"/>
-        <param field="Username" label="Shelly Username" width="60px" required="false" default=""/>
-        <param field="Password" label="Shelly Password" width="60px" password="true" required="false" default=""/>
+        <param field="Password" label="Shelly Password" width="200px" password="true" required="false" default=""/>
         <param field="Mode1" label="Friendly Name" width="120px" required="true" default="Shelly"/>
         <param field="Mode6" label="Debug" width="150px">
             <options>
@@ -41,6 +40,10 @@ import re
 import secrets
 import base64
 import uuid
+import hashlib
+import time
+
+SHA256_HA2 = hashlib.sha256(b"dummy_method:dummy_uri").hexdigest()
 
 
 UNITS_PER_CHANNEL = 4
@@ -64,6 +67,8 @@ class BasePlugin:
         self.total_channels = 0
         self.pending_config = None
         self.pending_status = None
+        self.auth = None
+        self.awaiting_auth_challenge = False
 
     def _base_unit(self, ch):
         return 1 + ch * UNITS_PER_CHANNEL
@@ -226,9 +231,35 @@ class BasePlugin:
             self.pending_config = None
             self.pending_status = None
 
+    def _build_auth(self, nonce, nc, realm):
+        password = Parameters.get("Password", "")
+        ha1 = hashlib.sha256(f"admin:{realm}:{password}".encode("utf-8")).hexdigest()
+        cnonce = int(time.time())
+        response = hashlib.sha256(f"{ha1}:{nonce}:{nc}:{cnonce}:auth:{SHA256_HA2}".encode("utf-8")).hexdigest()
+        return {
+            "realm": realm,
+            "username": "admin",
+            "nonce": nonce,
+            "cnonce": cnonce,
+            "response": response,
+            "algorithm": "SHA-256",
+        }
+
     def _send_ws(self, payload):
+        if self.auth and "method" in payload:
+            payload["auth"] = self.auth
         if self.websocketConn and self.websocketConn.Connected():
             self.websocketConn.Send({"Payload": json.dumps(payload), "Mask": secrets.randbits(32)})
+
+    def _start_discovery(self):
+        subscribe_msg = {"id": 1, "src": self.client_id, "params": {"events": ["*"]}}
+        self._send_ws(subscribe_msg)
+        Domoticz.Log(f"Subscribed to events (client_id: {self.client_id})")
+        config_msg = {"id": 10, "src": self.client_id, "method": "Shelly.GetConfig", "params": {}}
+        self._send_ws(config_msg)
+        status_msg = {"id": 11, "src": self.client_id, "method": "Shelly.GetStatus", "params": {}}
+        self._send_ws(status_msg)
+        Domoticz.Log("Requested config and status for discovery")
 
     def onStart(self):
         self.client_id = str(uuid.uuid4())
@@ -273,14 +304,14 @@ class BasePlugin:
         if "Status" in Data:
             if Data["Status"] == "101":
                 Domoticz.Log("WebSocket upgraded")
-                subscribe_msg = {"id": 1, "src": self.client_id, "params": {"events": ["*"]}}
-                self._send_ws(subscribe_msg)
-                Domoticz.Log(f"Subscribed to events (client_id: {self.client_id})")
-                config_msg = {"id": 10, "src": self.client_id, "method": "Shelly.GetConfig", "params": {}}
-                self._send_ws(config_msg)
-                status_msg = {"id": 11, "src": self.client_id, "method": "Shelly.GetStatus", "params": {}}
-                self._send_ws(status_msg)
-                Domoticz.Log("Requested config and status for discovery")
+                password = Parameters.get("Password", "").strip()
+                if password:
+                    Domoticz.Log("Authentication configured, sending probe...")
+                    self.awaiting_auth_challenge = True
+                    probe = {"id": 0, "src": self.client_id, "method": "Shelly.GetStatus", "params": {}}
+                    self.websocketConn.Send({"Payload": json.dumps(probe), "Mask": secrets.randbits(32)})
+                else:
+                    self._start_discovery()
             else:
                 DumpWSResponseToLog(Data)
 
@@ -300,7 +331,20 @@ class BasePlugin:
                 payload = json.loads(Data["Payload"])
                 Domoticz.Debug("Received: " + json.dumps(payload))
 
-                if payload.get("method") == "NotifyStatus" and "params" in payload:
+                if "error" in payload and payload["error"].get("code") == 401:
+                    try:
+                        challenge = json.loads(payload["error"]["message"])
+                        nonce = challenge["nonce"]
+                        nc = challenge.get("nc", 1)
+                        realm = challenge["realm"]
+                        self.auth = self._build_auth(nonce, nc, realm)
+                        Domoticz.Log(f"Authenticated to {realm}")
+                        self.awaiting_auth_challenge = False
+                        self._start_discovery()
+                    except Exception as e:
+                        Domoticz.Error(f"Authentication failed: {e}")
+
+                elif payload.get("method") == "NotifyStatus" and "params" in payload:
                     params = payload["params"]
                     for key, value in params.items():
                         m = re.match(r"^switch:(\d+)$", key)

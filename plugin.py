@@ -182,21 +182,21 @@ class BasePlugin:
             Devices[ids["energy"]].Units[unit].nValue = 0
             Devices[ids["energy"]].Units[unit].sValue = sValue
             Devices[ids["energy"]].Units[unit].Update(Log=True)
-            Domoticz.Log(f"Energy:{ch} updated: {sValue}")
+            Domoticz.Debug(f"Energy:{ch} updated: {sValue}")
 
         if "freq" in data and ids["freq"] in Devices:
             unit = base + UNIT_OFFSET_FREQUENCY
             Devices[ids["freq"]].Units[unit].nValue = 0
             Devices[ids["freq"]].Units[unit].sValue = str(cache["freq"])
             Devices[ids["freq"]].Units[unit].Update(Log=True)
-            Domoticz.Log(f"Frequency:{ch} updated: {cache['freq']}")
+            Domoticz.Debug(f"Frequency:{ch} updated: {cache['freq']}")
 
         if cache["temp"] is not None and ids["temp"] in Devices:
             unit = base + UNIT_OFFSET_TEMPERATURE
             Devices[ids["temp"]].Units[unit].nValue = 0
             Devices[ids["temp"]].Units[unit].sValue = str(cache["temp"])
             Devices[ids["temp"]].Units[unit].Update(Log=True)
-            Domoticz.Log(f"Temperature:{ch} updated: {cache['temp']}")
+            Domoticz.Debug(f"Temperature:{ch} updated: {cache['temp']}")
 
     def _extract_channel_names(self, config):
         for key, value in config.items():
@@ -332,6 +332,7 @@ class BasePlugin:
         if self.websocketConn and self.websocketConn.Connected():
             self.websocketConn.Send({"Operation": "Ping", "Mask": secrets.randbits(32)})
             Domoticz.Debug("Ping sent")
+            Domoticz.Log("Alive")
         else:
             self.reconAgain -= 1
             if self.reconAgain <= 0:

@@ -68,7 +68,6 @@ class BasePlugin:
         self.pending_config = None
         self.pending_status = None
         self.auth = None
-        self.awaiting_auth_challenge = False
 
     def _base_unit(self, ch):
         return 1 + ch * UNITS_PER_CHANNEL
@@ -249,17 +248,14 @@ class BasePlugin:
         if self.auth and "method" in payload:
             payload["auth"] = self.auth
         if self.websocketConn and self.websocketConn.Connected():
-            self.websocketConn.Send({"Payload": json.dumps(payload), "Mask": secrets.randbits(32)})
+            raw = json.dumps(payload)
+            Domoticz.Debug(f"WS send ({len(raw)}b): {raw}")
+            self.websocketConn.Send({"Payload": raw, "Mask": secrets.randbits(32)})
 
     def _start_discovery(self):
-        subscribe_msg = {"id": 1, "src": self.client_id, "params": {"events": ["*"]}}
-        self._send_ws(subscribe_msg)
-        Domoticz.Log(f"Subscribed to events (client_id: {self.client_id})")
         config_msg = {"id": 10, "src": self.client_id, "method": "Shelly.GetConfig", "params": {}}
         self._send_ws(config_msg)
-        status_msg = {"id": 11, "src": self.client_id, "method": "Shelly.GetStatus", "params": {}}
-        self._send_ws(status_msg)
-        Domoticz.Log("Requested config and status for discovery")
+        Domoticz.Log(f"Requested config for discovery (src: {self.client_id})")
 
     def onStart(self):
         self.client_id = str(uuid.uuid4())
@@ -306,8 +302,7 @@ class BasePlugin:
                 Domoticz.Log("WebSocket upgraded")
                 password = Parameters.get("Password", "").strip()
                 if password:
-                    Domoticz.Log("Authentication configured, sending probe...")
-                    self.awaiting_auth_challenge = True
+                    Domoticz.Log("Auth configured, sending probe for 401 challenge...")
                     probe = {"id": 0, "src": self.client_id, "method": "Shelly.GetStatus", "params": {}}
                     self.websocketConn.Send({"Payload": json.dumps(probe), "Mask": secrets.randbits(32)})
                 else:
@@ -338,11 +333,10 @@ class BasePlugin:
                         nc = challenge.get("nc", 1)
                         realm = challenge["realm"]
                         self.auth = self._build_auth(nonce, nc, realm)
-                        Domoticz.Log(f"Authenticated to {realm}")
-                        self.awaiting_auth_challenge = False
+                        Domoticz.Log(f"Auth built for realm '{realm}', starting discovery...")
                         self._start_discovery()
                     except Exception as e:
-                        Domoticz.Error(f"Authentication failed: {e}")
+                        Domoticz.Error(f"Failed to parse 401 challenge: {e}")
 
                 elif payload.get("method") == "NotifyStatus" and "params" in payload:
                     params = payload["params"]
@@ -358,11 +352,15 @@ class BasePlugin:
                     if payload["id"] == 10:
                         Domoticz.Log("Received device config")
                         self.pending_config = payload["result"]
-                        self._try_complete_discovery()
+                        status_msg = {"id": 11, "src": self.client_id, "method": "Shelly.GetStatus", "params": {}}
+                        self._send_ws(status_msg)
+                        Domoticz.Log("Requested status for discovery")
                     elif payload["id"] == 11:
                         Domoticz.Log("Received device status")
                         self.pending_status = payload["result"]
                         self._try_complete_discovery()
+                    elif payload["id"] == 100:
+                        Domoticz.Debug("Switch command acknowledged")
 
             except json.JSONDecodeError as e:
                 Domoticz.Error("Failed to parse JSON: " + str(e))
@@ -381,6 +379,7 @@ class BasePlugin:
             self.reconAgain -= 1
             if self.reconAgain <= 0:
                 Domoticz.Log("Reconnecting...")
+                self.auth = None
                 self.websocketConn = Domoticz.Connection(
                     Name="ShellyWebSocket",
                     Transport="TCP/IP",
@@ -472,14 +471,13 @@ def DumpConfigToLog():
             else:
                 Domoticz.Debug(f"'{x}':'{str(Parameters[x])}'")
 
-    Domoticz.Debug("Device count: " + str(len(Devices)))
-    for x in Devices:
-        Domoticz.Debug("Device:           " + str(x) + " - " + str(Devices[x]))
-        Domoticz.Debug("Device ID:       '" + str(Devices[x].ID) + "'")
-        Domoticz.Debug("Device Name:     '" + Devices[x].Name + "'")
-        Domoticz.Debug("Device nValue:    " + str(Devices[x].nValue))
-        Domoticz.Debug("Device sValue:   '" + Devices[x].sValue + "'")
-        Domoticz.Debug("Device LastLevel: " + str(Devices[x].LastLevel))
+    Domoticz.Debug(f"Device count: {len(Devices)}")
+    for devID in Devices:
+        dev = Devices[devID]
+        Domoticz.Debug(f"DeviceID: '{devID}' — Units: {len(dev.Units)}")
+        for unit in dev.Units:
+            u = dev.Units[unit]
+            Domoticz.Debug(f"  Unit {unit}: Name='{u.Name}', nValue={u.nValue}, sValue='{u.sValue}'")
 
 def DumpWSResponseToLog(httpDict):
     if isinstance(httpDict, dict):

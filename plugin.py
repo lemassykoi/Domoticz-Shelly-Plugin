@@ -68,6 +68,7 @@ class BasePlugin:
         self.pending_config = None
         self.pending_status = None
         self.auth = None
+        self.is_reconnect = False
 
     def _base_unit(self, ch):
         return 1 + ch * UNITS_PER_CHANNEL
@@ -149,7 +150,7 @@ class BasePlugin:
             except Exception as e:
                 Domoticz.Debug(f"Temperature device ch{ch} creation failed: {e}")
 
-    def _process_switch_data(self, ch, data):
+    def _process_switch_data(self, ch, data, skip_output=False):
         Domoticz.Debug(f"Processing switch:{ch} data: {json.dumps(data)}")
 
         cache = self.channel_cache.setdefault(ch, {"power": 0.0, "energy_wh": 0.0, "freq": 0.0, "temp": None})
@@ -172,7 +173,7 @@ class BasePlugin:
             elif isinstance(t, (int, float)):
                 cache["temp"] = t
 
-        if "output" in data and ids["switch"] in Devices:
+        if "output" in data and not skip_output and ids["switch"] in Devices:
             is_on = data["output"]
             unit = base + UNIT_OFFSET_SWITCH
             Devices[ids["switch"]].Units[unit].nValue = 1 if is_on else 0
@@ -221,7 +222,7 @@ class BasePlugin:
         for ch, value in channels:
             has_temp = "temperature" in value
             self._ensure_channel_devices(ch, has_temp=has_temp)
-            self._process_switch_data(ch, value)
+            self._process_switch_data(ch, value, skip_output=self.is_reconnect)
 
     def _try_complete_discovery(self):
         if self.pending_config is not None and self.pending_status is not None:
@@ -380,6 +381,7 @@ class BasePlugin:
             if self.reconAgain <= 0:
                 Domoticz.Log("Reconnecting...")
                 self.auth = None
+                self.is_reconnect = True
                 self.websocketConn = Domoticz.Connection(
                     Name="ShellyWebSocket",
                     Transport="TCP/IP",

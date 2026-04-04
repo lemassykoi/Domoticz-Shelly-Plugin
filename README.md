@@ -1,20 +1,22 @@
 # Domoticz-Shelly-Plugin
 
-Domoticz Plugin for Shelly Gen2+ devices with switch and power metering.
+Domoticz Plugin for Shelly Gen2+ devices with switch and/or energy metering.
 
 ## Supported Devices
 
 - Shelly Pro 1PM (1 switch + temperature)
 - Shelly Outdoor Plug S Gen3 (1 switch + temperature)
 - Shelly Power Strip Gen4 (4 switches)
-- Any other Shelly Gen2+ device with switch components
+- Shelly Pro EM-50 (2 EM channels + dry-contact relay)
+- Any other Shelly Gen2+ device with switch and/or EM1 components
 
 ## Features
 
-- Auto-discovers all switch channels on the device
-- Per-channel sensors: Switch (On/Off), Energy (W + Wh), Frequency (Hz)
+- Auto-discovers all switch and EM channels on the device
+- Per-switch sensors: Switch (On/Off), Energy (W + Wh), Frequency (Hz)
+- Per-EM channel sensors: Energy (W + Wh), Voltage (V), Current (A), Frequency (Hz)
 - Temperature sensor (created automatically if reported by the device)
-- Uses Shelly switch names (from device config) for multi-channel device naming
+- Uses Shelly channel names (from device config) for multi-channel device naming
 - WebSocket-based communication for real-time updates
 
 ## Devices Created
@@ -27,6 +29,15 @@ For each switch channel, the plugin creates:
 | Energy | kWh | Active power (W) and total energy (Wh) |
 | Frequency | Custom (Hz) | Mains frequency (created as unused by default) |
 | Temperature | Temp | Device temperature (only if reported) |
+
+For each EM channel (e.g. Shelly Pro EM-50), the plugin creates:
+
+| Sensor | Type | Description |
+|--------|------|-------------|
+| Energy | kWh | Active power (W) and total energy (Wh) |
+| Voltage | Custom (V) | Mains voltage |
+| Current | Custom (A) | Measured current |
+| Frequency | Custom (Hz) | Mains frequency (created as unused by default) |
 
 ## Installation
 

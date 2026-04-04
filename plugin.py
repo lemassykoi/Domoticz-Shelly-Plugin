@@ -362,12 +362,15 @@ class BasePlugin:
 
     def _extract_channel_names(self, config):
         for key, value in config.items():
+            if not isinstance(value, dict):
+                continue
             m = re.match(r"^switch:(\d+)$", key)
             if m:
                 ch = int(m.group(1))
                 name = value.get("name")
                 if name:
                     self.channel_names[ch] = name
+                continue
             m = re.match(r"^em1:(\d+)$", key)
             if m:
                 ch = int(m.group(1))
@@ -379,7 +382,7 @@ class BasePlugin:
         channels = []
         for key, value in status.items():
             m = re.match(r"^switch:(\d+)$", key)
-            if m:
+            if m and isinstance(value, dict):
                 channels.append((int(m.group(1)), value))
         self.total_channels = len(channels)
         for ch, value in channels:
@@ -389,13 +392,13 @@ class BasePlugin:
 
         for key, value in status.items():
             m = re.match(r"^em1:(\d+)$", key)
-            if m:
+            if m and isinstance(value, dict):
                 ch = int(m.group(1))
                 self._ensure_em_devices(ch)
                 self._process_em1_data(ch, value)
         for key, value in status.items():
             m = re.match(r"^em1data:(\d+)$", key)
-            if m:
+            if m and isinstance(value, dict):
                 ch = int(m.group(1))
                 self._process_em1data(ch, value)
 
@@ -517,6 +520,8 @@ class BasePlugin:
                 elif payload.get("method") == "NotifyStatus" and "params" in payload:
                     params = payload["params"]
                     for key, value in params.items():
+                        if not isinstance(value, dict):
+                            continue
                         m = re.match(r"^switch:(\d+)$", key)
                         if m:
                             ch = int(m.group(1))

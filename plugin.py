@@ -1,20 +1,23 @@
 """
-<plugin key="ShellyGen2Switch" name="Shelly Gen2+ Switch" author="lemassykoi" version="2.0" externallink="https://github.com/lemassykoi/Domoticz-Shelly-Plugin">
+<plugin key="ShellyGen2Switch" name="Shelly Gen2+ Switch" author="lemassykoi" version="2.1" externallink="https://github.com/lemassykoi/Domoticz-Shelly-Plugin">
     <description>
-        <h2>Shelly Gen2+ Switch Plugin</h2><br/>
-        WebSocket-based integration for Shelly Gen2+ devices with switch and power metering.<br/>
+        <h2>Shelly Gen2+ Plugin</h2><br/>
+        WebSocket-based integration for Shelly Gen2+ devices with switch and/or energy metering.<br/>
         <br/>
         <h3>Supported devices</h3>
         <ul style="list-style-type:square">
             <li>Shelly Pro 1PM (1 switch)</li>
             <li>Shelly Outdoor Plug S Gen3 (1 switch + temperature)</li>
             <li>Shelly Power Strip Gen4 (4 switches)</li>
-            <li>Any other Shelly Gen2+ device with switch components</li>
+            <li>Shelly Pro EM-50 (2 EM channels + dry-contact relay)</li>
+            <li>Any other Shelly Gen2+ device with switch and/or EM1 components</li>
         </ul>
         <h3>Features</h3>
         <ul style="list-style-type:square">
             <li>Switch (On/Off control)</li>
             <li>Energy (W + Wh)</li>
+            <li>Voltage (V)</li>
+            <li>Current (A)</li>
             <li>Frequency (Hz)</li>
             <li>Temperature (if reported by device)</li>
         </ul>
@@ -52,6 +55,13 @@ UNIT_OFFSET_ENERGY = 1
 UNIT_OFFSET_FREQUENCY = 2
 UNIT_OFFSET_TEMPERATURE = 3
 
+EM_BASE_OFFSET = 100
+UNITS_PER_EM_CHANNEL = 4
+EM_UNIT_OFFSET_POWER = 0
+EM_UNIT_OFFSET_VOLTAGE = 1
+EM_UNIT_OFFSET_CURRENT = 2
+EM_UNIT_OFFSET_FREQUENCY = 3
+
 
 class BasePlugin:
     websocketConn = None
@@ -69,6 +79,9 @@ class BasePlugin:
         self.pending_status = None
         self.auth = None
         self.is_reconnect = False
+        self.em_cache = {}
+        self.discovered_em_channels = set()
+        self.em_channel_names = {}
 
     def _base_unit(self, ch):
         return 1 + ch * UNITS_PER_CHANNEL
@@ -203,6 +216,150 @@ class BasePlugin:
             Devices[ids["temp"]].Units[unit].Update(Log=True)
             Domoticz.Debug(f"Temperature:{ch} updated: {cache['temp']}")
 
+    def _em_base_unit(self, ch):
+        return EM_BASE_OFFSET + ch * UNITS_PER_EM_CHANNEL
+
+    def _em_device_ids(self, ch):
+        return {
+            "power": f"em1:{ch}:power",
+            "voltage": f"em1:{ch}:voltage",
+            "current": f"em1:{ch}:current",
+            "freq": f"em1:{ch}:freq",
+        }
+
+    def _em_channel_label(self, ch, suffix):
+        friendly = str(Parameters["Mode1"])
+        name = self.em_channel_names.get(ch)
+        if name:
+            return f"{friendly} {name} {suffix}"
+        return f"{friendly} EM {ch + 1} {suffix}"
+
+    def _ensure_em_devices(self, ch):
+        if ch in self.discovered_em_channels:
+            return
+        self.discovered_em_channels.add(ch)
+        self.em_cache[ch] = {"act_power": 0.0, "voltage": 0.0, "current": 0.0, "freq": 0.0, "total_act_energy": 0.0}
+
+        base = self._em_base_unit(ch)
+        ids = self._em_device_ids(ch)
+
+        if ids["power"] not in Devices:
+            try:
+                Domoticz.Unit(
+                    Name=self._em_channel_label(ch, "Energy"),
+                    DeviceID=ids["power"],
+                    Unit=base + EM_UNIT_OFFSET_POWER,
+                    Type=243, Subtype=29, Used=1,
+                ).Create()
+                Domoticz.Log(f"Created EM power device for em1:{ch}")
+            except Exception as e:
+                Domoticz.Debug(f"EM power device em1:{ch} creation failed: {e}")
+
+        if ids["voltage"] not in Devices:
+            try:
+                Domoticz.Unit(
+                    Name=self._em_channel_label(ch, "Voltage"),
+                    DeviceID=ids["voltage"],
+                    Unit=base + EM_UNIT_OFFSET_VOLTAGE,
+                    Type=243, Subtype=31, Used=1,
+                    Options={"Custom": "1;V"},
+                ).Create()
+                Domoticz.Log(f"Created EM voltage device for em1:{ch}")
+            except Exception as e:
+                Domoticz.Debug(f"EM voltage device em1:{ch} creation failed: {e}")
+
+        if ids["current"] not in Devices:
+            try:
+                Domoticz.Unit(
+                    Name=self._em_channel_label(ch, "Current"),
+                    DeviceID=ids["current"],
+                    Unit=base + EM_UNIT_OFFSET_CURRENT,
+                    Type=243, Subtype=31, Used=1,
+                    Options={"Custom": "1;A"},
+                ).Create()
+                Domoticz.Log(f"Created EM current device for em1:{ch}")
+            except Exception as e:
+                Domoticz.Debug(f"EM current device em1:{ch} creation failed: {e}")
+
+        if ids["freq"] not in Devices:
+            try:
+                Domoticz.Unit(
+                    Name=self._em_channel_label(ch, "Frequency"),
+                    DeviceID=ids["freq"],
+                    Unit=base + EM_UNIT_OFFSET_FREQUENCY,
+                    Type=243, Subtype=31, Used=0,
+                    Options={"Custom": "1;Hz"},
+                ).Create()
+                Domoticz.Log(f"Created EM frequency device for em1:{ch}")
+            except Exception as e:
+                Domoticz.Debug(f"EM frequency device em1:{ch} creation failed: {e}")
+
+    def _process_em1_data(self, ch, data):
+        Domoticz.Debug(f"Processing em1:{ch} data: {json.dumps(data)}")
+
+        cache = self.em_cache.setdefault(ch, {"act_power": 0.0, "voltage": 0.0, "current": 0.0, "freq": 0.0, "total_act_energy": 0.0})
+        ids = self._em_device_ids(ch)
+        base = self._em_base_unit(ch)
+
+        if "act_power" in data:
+            cache["act_power"] = data["act_power"]
+
+        if "voltage" in data:
+            cache["voltage"] = data["voltage"]
+
+        if "current" in data:
+            cache["current"] = data["current"]
+
+        if "freq" in data:
+            cache["freq"] = data["freq"]
+
+        if ("act_power" in data or "voltage" in data) and ids["power"] in Devices:
+            sValue = f"{cache['act_power']:.1f};{cache['total_act_energy']:.1f}"
+            unit = base + EM_UNIT_OFFSET_POWER
+            Devices[ids["power"]].Units[unit].nValue = 0
+            Devices[ids["power"]].Units[unit].sValue = sValue
+            Devices[ids["power"]].Units[unit].Update(Log=True)
+            Domoticz.Debug(f"EM Power em1:{ch} updated: {sValue}")
+
+        if "voltage" in data and ids["voltage"] in Devices:
+            unit = base + EM_UNIT_OFFSET_VOLTAGE
+            Devices[ids["voltage"]].Units[unit].nValue = 0
+            Devices[ids["voltage"]].Units[unit].sValue = f"{cache['voltage']:.1f}"
+            Devices[ids["voltage"]].Units[unit].Update(Log=True)
+            Domoticz.Debug(f"EM Voltage em1:{ch} updated: {cache['voltage']}")
+
+        if "current" in data and ids["current"] in Devices:
+            unit = base + EM_UNIT_OFFSET_CURRENT
+            Devices[ids["current"]].Units[unit].nValue = 0
+            Devices[ids["current"]].Units[unit].sValue = f"{cache['current']:.3f}"
+            Devices[ids["current"]].Units[unit].Update(Log=True)
+            Domoticz.Debug(f"EM Current em1:{ch} updated: {cache['current']}")
+
+        if "freq" in data and ids["freq"] in Devices:
+            unit = base + EM_UNIT_OFFSET_FREQUENCY
+            Devices[ids["freq"]].Units[unit].nValue = 0
+            Devices[ids["freq"]].Units[unit].sValue = str(cache["freq"])
+            Devices[ids["freq"]].Units[unit].Update(Log=True)
+            Domoticz.Debug(f"EM Frequency em1:{ch} updated: {cache['freq']}")
+
+    def _process_em1data(self, ch, data):
+        Domoticz.Debug(f"Processing em1data:{ch} data: {json.dumps(data)}")
+
+        cache = self.em_cache.setdefault(ch, {"act_power": 0.0, "voltage": 0.0, "current": 0.0, "freq": 0.0, "total_act_energy": 0.0})
+        ids = self._em_device_ids(ch)
+        base = self._em_base_unit(ch)
+
+        if "total_act_energy" in data:
+            cache["total_act_energy"] = data["total_act_energy"]
+
+            if ids["power"] in Devices:
+                sValue = f"{cache['act_power']:.1f};{cache['total_act_energy']:.1f}"
+                unit = base + EM_UNIT_OFFSET_POWER
+                Devices[ids["power"]].Units[unit].nValue = 0
+                Devices[ids["power"]].Units[unit].sValue = sValue
+                Devices[ids["power"]].Units[unit].Update(Log=True)
+                Domoticz.Debug(f"EM Energy em1:{ch} updated: {sValue}")
+
     def _extract_channel_names(self, config):
         for key, value in config.items():
             m = re.match(r"^switch:(\d+)$", key)
@@ -211,6 +368,12 @@ class BasePlugin:
                 name = value.get("name")
                 if name:
                     self.channel_names[ch] = name
+            m = re.match(r"^em1:(\d+)$", key)
+            if m:
+                ch = int(m.group(1))
+                name = value.get("name")
+                if name:
+                    self.em_channel_names[ch] = name
 
     def _discover_channels(self, status):
         channels = []
@@ -223,6 +386,18 @@ class BasePlugin:
             has_temp = "temperature" in value
             self._ensure_channel_devices(ch, has_temp=has_temp)
             self._process_switch_data(ch, value, skip_output=self.is_reconnect)
+
+        for key, value in status.items():
+            m = re.match(r"^em1:(\d+)$", key)
+            if m:
+                ch = int(m.group(1))
+                self._ensure_em_devices(ch)
+                self._process_em1_data(ch, value)
+        for key, value in status.items():
+            m = re.match(r"^em1data:(\d+)$", key)
+            if m:
+                ch = int(m.group(1))
+                self._process_em1data(ch, value)
 
     def _try_complete_discovery(self):
         if self.pending_config is not None and self.pending_status is not None:
@@ -348,6 +523,18 @@ class BasePlugin:
                             if ch not in self.discovered_channels:
                                 self._ensure_channel_devices(ch, has_temp=("temperature" in value))
                             self._process_switch_data(ch, value)
+                            continue
+                        m = re.match(r"^em1:(\d+)$", key)
+                        if m:
+                            ch = int(m.group(1))
+                            if ch not in self.discovered_em_channels:
+                                self._ensure_em_devices(ch)
+                            self._process_em1_data(ch, value)
+                            continue
+                        m = re.match(r"^em1data:(\d+)$", key)
+                        if m:
+                            ch = int(m.group(1))
+                            self._process_em1data(ch, value)
 
                 elif "result" in payload and "id" in payload:
                     if payload["id"] == 10:

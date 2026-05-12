@@ -85,6 +85,7 @@ class BasePlugin:
         self.em_cache = {}
         self.discovered_em_channels = set()
         self.em_channel_names = {}
+        self.last_uptime = None
 
     def _base_unit(self, ch):
         return 1 + ch * UNITS_PER_CHANNEL
@@ -381,7 +382,19 @@ class BasePlugin:
                 if name:
                     self.em_channel_names[ch] = name
 
+    def _process_sys_data(self, data):
+        if not isinstance(data, dict):
+            return
+        uptime = data.get("uptime")
+        if isinstance(uptime, (int, float)):
+            if self.last_uptime is not None and uptime + 5 < self.last_uptime:
+                Domoticz.Log(
+                    f"Shelly uptime reset from {int(self.last_uptime)}s to {int(uptime)}s - device reboot/reset detected"
+                )
+            self.last_uptime = uptime
+
     def _discover_channels(self, status):
+        self._process_sys_data(status.get("sys"))
         channels = []
         for key, value in status.items():
             m = re.match(r"^switch:(\d+)$", key)
@@ -537,6 +550,9 @@ class BasePlugin:
                     params = payload["params"]
                     for key, value in params.items():
                         if not isinstance(value, dict):
+                            continue
+                        if key == "sys":
+                            self._process_sys_data(value)
                             continue
                         m = re.match(r"^switch:(\d+)$", key)
                         if m:

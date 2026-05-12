@@ -78,6 +78,9 @@ class BasePlugin:
         self.pending_config = None
         self.pending_status = None
         self.auth = None
+        self.pending_commands = []
+        self.inflight_commands = {}
+        self.next_cmd_id = 100
         self.is_reconnect = False
         self.em_cache = {}
         self.discovered_em_channels = set()
@@ -512,8 +515,21 @@ class BasePlugin:
                         nc = challenge.get("nc", 1)
                         realm = challenge["realm"]
                         self.auth = self._build_auth(nonce, nc, realm)
-                        Domoticz.Log(f"Auth built for realm '{realm}', starting discovery...")
-                        self._start_discovery()
+                        failed_id = payload.get("id")
+                        failed_cmd = self.inflight_commands.pop(failed_id, None)
+                        if failed_cmd is not None:
+                            Domoticz.Log(f"Auth refreshed for realm '{realm}', replaying rejected command id={failed_id}")
+                            self.pending_commands.append(failed_cmd)
+                        else:
+                            Domoticz.Log(f"Auth built for realm '{realm}', starting discovery...")
+                            self._start_discovery()
+                        if self.pending_commands:
+                            Domoticz.Log(f"Flushing {len(self.pending_commands)} queued command(s) now that auth is ready")
+                            queued = self.pending_commands
+                            self.pending_commands = []
+                            for cmd in queued:
+                                self.inflight_commands[cmd["id"]] = cmd
+                                self._send_ws(cmd)
                     except Exception as e:
                         Domoticz.Error(f"Failed to parse 401 challenge: {e}")
 
@@ -552,8 +568,9 @@ class BasePlugin:
                         Domoticz.Log("Received device status")
                         self.pending_status = payload["result"]
                         self._try_complete_discovery()
-                    elif payload["id"] == 100:
-                        Domoticz.Debug("Switch command acknowledged")
+                    elif payload["id"] in self.inflight_commands:
+                        self.inflight_commands.pop(payload["id"], None)
+                        Domoticz.Debug(f"Switch command acknowledged (id={payload['id']})")
 
             except json.JSONDecodeError as e:
                 Domoticz.Error("Failed to parse JSON: " + str(e))
@@ -573,6 +590,12 @@ class BasePlugin:
             if self.reconAgain <= 0:
                 Domoticz.Log("Reconnecting...")
                 self.auth = None
+                if self.pending_commands:
+                    Domoticz.Log(f"Discarding {len(self.pending_commands)} queued command(s) due to reconnect")
+                    self.pending_commands = []
+                if self.inflight_commands:
+                    Domoticz.Log(f"Discarding {len(self.inflight_commands)} inflight command(s) due to reconnect")
+                    self.inflight_commands = {}
                 self.is_reconnect = True
                 self.websocketConn = Domoticz.Connection(
                     Name="ShellyWebSocket",
@@ -599,12 +622,24 @@ class BasePlugin:
         if m:
             ch = int(m.group(1))
             turn_on = Command.strip().upper() == "ON"
+            self.next_cmd_id += 1
             rpc_command = {
-                "id": 100,
+                "id": self.next_cmd_id,
                 "src": self.client_id,
                 "method": "Switch.Set",
                 "params": {"id": ch, "on": turn_on},
             }
+            password = Parameters.get("Password", "").strip()
+            if password and self.auth is None:
+                first = not self.pending_commands
+                self.pending_commands.append(rpc_command)
+                Domoticz.Log(f"Queued switch:{ch} command: {'ON' if turn_on else 'OFF'} (auth not ready)")
+                if first and self.websocketConn and self.websocketConn.Connected():
+                    probe = {"id": 0, "src": self.client_id, "method": "Shelly.GetStatus", "params": {}}
+                    self.websocketConn.Send({"Payload": json.dumps(probe), "Mask": secrets.randbits(32)})
+                    Domoticz.Log("Sent auth probe to obtain 401 challenge")
+                return
+            self.inflight_commands[rpc_command["id"]] = rpc_command
             self._send_ws(rpc_command)
             Domoticz.Log(f"Sent switch:{ch} command: {'ON' if turn_on else 'OFF'}")
 

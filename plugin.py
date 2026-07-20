@@ -174,14 +174,21 @@ class BasePlugin:
         ids = self._device_ids(ch)
         base = self._base_unit(ch)
 
-        if "apower" in data:
-            cache["power"] = abs(data["apower"])
+        power = data.get("apower")
+        power_updated = isinstance(power, (int, float))
+        if power_updated:
+            cache["power"] = abs(power)
 
-        if "aenergy" in data and "total" in data["aenergy"]:
-            cache["energy_wh"] = data["aenergy"]["total"]
+        aenergy = data.get("aenergy")
+        energy_total = aenergy.get("total") if isinstance(aenergy, dict) else None
+        energy_updated = isinstance(energy_total, (int, float))
+        if energy_updated:
+            cache["energy_wh"] = energy_total
 
-        if "freq" in data:
-            cache["freq"] = data["freq"]
+        frequency = data.get("freq")
+        frequency_updated = isinstance(frequency, (int, float))
+        if frequency_updated:
+            cache["freq"] = frequency
 
         if "temperature" in data:
             t = data["temperature"]
@@ -198,7 +205,7 @@ class BasePlugin:
             Devices[ids["switch"]].Units[unit].Update(Log=True)
             Domoticz.Log(f"Switch:{ch} updated: {'On' if is_on else 'Off'}")
 
-        if ("aenergy" in data or "apower" in data) and ids["energy"] in Devices:
+        if (power_updated or energy_updated) and ids["energy"] in Devices:
             sValue = f"{cache['power']:.1f};{cache['energy_wh']:.1f}"
             unit = base + UNIT_OFFSET_ENERGY
             Devices[ids["energy"]].Units[unit].nValue = 0
@@ -206,7 +213,7 @@ class BasePlugin:
             Devices[ids["energy"]].Units[unit].Update(Log=True)
             Domoticz.Debug(f"Energy:{ch} updated: {sValue}")
 
-        if "freq" in data and ids["freq"] in Devices:
+        if frequency_updated and ids["freq"] in Devices:
             unit = base + UNIT_OFFSET_FREQUENCY
             Devices[ids["freq"]].Units[unit].nValue = 0
             Devices[ids["freq"]].Units[unit].sValue = str(cache["freq"])
